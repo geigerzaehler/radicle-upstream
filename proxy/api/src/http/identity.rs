@@ -225,8 +225,14 @@ mod test {
                 "master",
             )?;
 
-            coco::control::track_fake_peer(&state, &ctx.signer, &platinum_project, "fintohaps")
-                .into()
+            coco::control::track_fake_peer(
+                &state,
+                &ctx.signer,
+                &owner,
+                &platinum_project,
+                "fintohaps",
+            )?
+            .into()
         };
 
         let res = request().method("GET").path("/").reply(&api).await;

@@ -592,7 +592,8 @@ mod test {
 
         let user: identity::Identity = {
             let state = ctx.state.lock().await;
-            coco::control::track_fake_peer(&state, &ctx.signer, &coco_project, "rafalca").into()
+            coco::control::track_fake_peer(&state, &ctx.signer, &owner, &coco_project, "rafalca")?
+                .into()
         };
 
         let res = request()

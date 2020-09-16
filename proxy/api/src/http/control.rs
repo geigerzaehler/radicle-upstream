@@ -64,6 +64,7 @@ mod handler {
                 let _ = coco::control::track_fake_peer(
                     &(*ctx.state.lock().await),
                     &ctx.signer,
+                    &owner,
                     &meta,
                     &user_handle,
                 );

@@ -2,13 +2,10 @@
 
 use std::{convert::TryFrom, env, io, path};
 
-use librad::{
-    keys,
-    meta::{entity, project as librad_project},
-};
+use librad::{git::storage, keys, meta, meta::entity, paths, peer::PeerId};
 use radicle_surf::vcs::git::git2;
 
-use crate::{config, error::Error, project, signer, state::State, user::User};
+use crate::{config, error::Error, project, signer, state::State, user};
 
 /// Deletes the local git repsoitory coco uses to keep its state.
 ///
@@ -16,8 +13,7 @@ use crate::{config, error::Error, project, signer, state::State, user::User};
 ///
 /// Will error in case the call to the [`std::fs::remove_dir_all`] fails.
 pub fn nuke_monorepo() -> Result<(), std::io::Error> {
-    let paths =
-        librad::paths::Paths::try_from(config::Paths::default()).expect("unable to create paths");
+    let paths = paths::Paths::try_from(config::Paths::default()).expect("unable to create paths");
     std::fs::remove_dir_all(paths.git_dir())
 }
 
@@ -30,7 +26,7 @@ pub fn nuke_monorepo() -> Result<(), std::io::Error> {
 pub fn setup_fixtures(
     api: &State,
     signer: &signer::BoxedSigner,
-    owner: &User,
+    owner: &user::User,
 ) -> Result<(), Error> {
     let infos = vec![
         ("monokel", "A looking glass into the future", "master"),
@@ -68,11 +64,11 @@ pub fn setup_fixtures(
 pub fn replicate_platinum(
     api: &State,
     signer: &signer::BoxedSigner,
-    owner: &User,
+    owner: &user::User,
     name: &str,
     description: &str,
     default_branch: &str,
-) -> Result<librad_project::Project<entity::Draft>, Error> {
+) -> Result<meta::project::Project<entity::Draft>, Error> {
     // Construct path for fixtures to clone into.
     let monorepo = api.monorepo();
     let workspace = monorepo.join("../workspace");
@@ -131,85 +127,104 @@ pub fn platinum_directory() -> io::Result<path::PathBuf> {
 }
 
 /// Create and track a fake peer.
-#[must_use]
+///
+/// # Errors
+///
+/// * yo mamam
+#[allow(clippy::panic)]
 pub fn track_fake_peer(
     state: &State,
     signer: &signer::BoxedSigner,
-    project: &librad_project::Project<entity::Draft>,
-    fake_user_handle: &str,
-) -> (
-    librad::peer::PeerId,
-    librad::meta::entity::Entity<librad::meta::user::UserInfo, librad::meta::entity::Draft>,
-) {
-    // TODO(finto): We're faking a lot of the networking interaction here.
-    // Create git references of the form and track the peer.
-    //   refs/namespaces/<platinum_project.id>/remotes/<fake_peer_id>/signed_refs/heads
-    //   refs/namespaces/<platinum_project.id>/remotes/<fake_peer_id>/rad/id
-    //   refs/namespaces/<platinum_project.id>/remotes/<fake_peer_id>/rad/self <- points
-    //   to fake_user
-    let urn = project.urn();
-    let fake_user =
-        state.init_user(signer, fake_user_handle).unwrap_or_else(|_| panic!("User account creation for fake peer: {} failed, make sure your mocked user accounts don't clash!", fake_user_handle));
-    let remote = librad::peer::PeerId::from(keys::SecretKey::new());
-    let monorepo = git2::Repository::open(state.monorepo()).expect("failed to open monorepo");
-    let prefix = format!("refs/namespaces/{}/refs/remotes/{}", urn.id, remote);
+    local_owner: &user::User,
+    project: &meta::project::Project<entity::Draft>,
+    handle: &str,
+) -> Result<
+    (
+        PeerId,
+        entity::Entity<meta::user::UserInfo, meta::entity::Verified>,
+    ),
+    Error,
+> {
+    // Create fresh storage
+    let tmp_dir = tempfile::tempdir()?;
+    let paths = paths::Paths::from_root(tmp_dir.path())?;
+    let key = keys::SecretKey::new();
+    let storage = storage::Storage::open_or_init(&paths, key.clone())?;
 
-    // Grab the Oid of master for the given project.
-    let target = monorepo
-        .find_reference(&format!("refs/namespaces/{}/refs/heads/master", urn.id))
-        .expect("failed to get master")
-        .target()
-        .expect("missing target");
+    // Create fake user/owner
+    let owner = {
+        let mut user = meta::user::User::<entity::Draft>::create(handle.to_string(), key.public())?;
+        user.sign_owned(&key)?;
+        let urn = user.urn();
 
-    // TODO: try pass branches in
-    // Creates a new reference to the 'target' Oid above.
-    let _heads = monorepo
-        .reference(
-            &format!("{}/heads/master", prefix),
-            target,
-            false,
-            "remote heads",
-        )
-        .expect("failed to create heads");
+        {
+            if storage.has_urn(&urn)? {
+                panic!("Entity exists");
+            } else {
+                storage.create_repo(&user)?;
+            }
+        }
+        user::verify(user)?
+    };
 
-    // Copy the rad/id under the remote
-    let target = monorepo
-        .find_reference(&format!("refs/namespaces/{}/refs/rad/id", urn.id))
-        .expect("failed to get rad/id")
-        .target()
-        .expect("missing target");
-    let _rad_id = monorepo
-        .reference(&format!("{}/rad/id", prefix), target, false, "rad/id")
-        .expect("failed to create rad/id");
+    // Clone local project
+    {
+        let mut meta = meta::project::Project::<entity::Draft>::create(
+            project.name().to_string(),
+            local_owner.urn(),
+        )?
+        .to_builder()
+        .set_description(project.description().as_deref().unwrap_or("").to_string())
+        .set_default_branch(project.default_branch().to_string())
+        .add_key(key.public())
+        .add_certifier(owner.urn())
+        .build()?;
 
-    // Create symlink to the User Identity for this project
-    let _rad_self = monorepo
-        .reference_symbolic(
-            &format!("{}/rad/self", prefix),
-            &format!("refs/namespaces/{}/refs/rad/id", fake_user.urn().id),
-            false,
-            "rad/self",
-        )
-        .expect("failed to create rad/self");
+        meta.sign_owned(&key)?;
 
-    // Create the copy of the rad/refs under the remote
-    let target = monorepo
-        .find_reference(&format!("refs/namespaces/{}/refs/rad/signed_refs", urn.id))
-        .expect("failed to get rad/signed_refs")
-        .target()
-        .expect("missing target");
-    let _rad_id = monorepo
-        .reference(
-            &format!("{}/rad/signed_refs", prefix),
-            target,
-            false,
-            "rad/signed_refs",
-        )
-        .expect("failed to create rad/refs");
+        let urn = meta.urn();
 
-    state.track(&urn, &remote).expect("failed to track peer");
+        let repo = storage.create_repo(&meta)?;
+        // repo.set_rad_self(storage::RadSelfSpec::Urn(owner.urn()))?;
+    };
+    let remote_repo = git2::Repository::open(paths.git_dir())?;
+    for reference in remote_repo.references()? {
+        let reference = reference?;
+        println!("REMOTE REF {:?}", reference.name());
+    }
 
-    (remote, fake_user)
+    // Fake fetching
+    let mono_path = state.monorepo();
+    let monorepo = git2::Repository::open(mono_path)?;
+    let mut remote = monorepo.remote(
+        &format!("local-remote-{}-{}", storage.peer_id(), handle),
+        &format!("file://{}", paths.git_dir().display()),
+    )?;
+
+    println!("REMOTE file://{}", paths.git_dir().display());
+
+    remote.connect(git2::Direction::Fetch)?;
+
+    remote.fetch(
+        &[&format!(
+            "+refs/namespaces/{}/refs/rad/id:refs/namespaces/{}/remotes/{}/rad/id",
+            project.urn().id,
+            project.urn().id,
+            storage.peer_id()
+        )],
+        None,
+        None,
+    )?;
+
+    for remote in &monorepo.remotes()? {
+        println!("REMOTE {:?}", remote);
+    }
+    for reference in monorepo.references()? {
+        let reference = reference?;
+        println!("REF {:?}", reference.name());
+    }
+
+    Ok((storage.peer_id().clone(), owner))
 }
 
 /// This function exists as a standalone because the logic does not play well with async in
