@@ -309,6 +309,7 @@ dependencies = [
  "kv",
  "lazy_static",
  "librad",
+ "librad-test",
  "log",
  "nonempty",
  "pretty_assertions",
@@ -1123,6 +1124,26 @@ dependencies = [
  "urltemplate",
  "webpki",
  "yasna",
+]
+
+[[package]]
+name = "librad-test"
+version = "0.1.0"
+source = "git+https://github.com/radicle-dev/radicle-link.git?rev=c16ce900776975e3de017af71763dc4e2e129d3f#c16ce900776975e3de017af71763dc4e2e129d3f"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "env_logger",
+ "futures 0.3.5",
+ "lazy_static",
+ "librad",
+ "minicbor",
+ "pretty_assertions",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

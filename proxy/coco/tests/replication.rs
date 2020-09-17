@@ -1,7 +1,12 @@
+#![feature(async_closure)]
+
 use librad::uri;
+use librad_test::rad::testnet;
 use radicle_surf::vcs::git::git2;
 
 use coco::config;
+use coco::signer;
+use coco::{State, Lock};
 
 mod common;
 use common::{build_peer, init_logging, shia_le_pathbuf};
@@ -10,52 +15,60 @@ use common::{build_peer, init_logging, shia_le_pathbuf};
 async fn can_clone_project() -> Result<(), Box<dyn std::error::Error>> {
     init_logging();
 
-    let alice_tmp_dir = tempfile::tempdir()?;
-    let alice_repo_path = alice_tmp_dir.path().join("radicle");
-    let (alice_peer, alice_state, alice_signer) = build_peer(&alice_tmp_dir).await?;
+    const NUM_PEERS: usize = 2;
 
-    let bob_tmp_dir = tempfile::tempdir()?;
-    let (bob_peer, bob_state, bob_signer) = build_peer(&bob_tmp_dir).await?;
-    let _bob = bob_state.lock().await.init_owner(&bob_signer, "bob")?;
+    let peers = testnet::setup(NUM_PEERS).await.unwrap();
+    testnet::run_on_testnet(peers, NUM_PEERS, async move |mut apis| {
+        let (peer1, peer1_key) = apis.pop().unwrap();
+        let (peer2, peer2_key) = apis.pop().unwrap();
 
-    tokio::task::spawn(alice_peer.run());
-    tokio::task::spawn(bob_peer.run());
+        let alice_signer: signer::BoxedSigner = peer1_key.into();
+        let alice_state = Lock::from(State::new(peer1, alice_signer.clone()));
+        let alice_tmp = tempfile::tempdir().unwrap();
+        let alice_repo_path = alice_tmp.path().join("working_copy");
 
-    let alice = alice_state
-        .lock()
-        .await
-        .init_owner(&alice_signer, "alice")?;
-    let project = alice_state.lock().await.init_project(
-        &alice_signer,
-        &alice,
-        &shia_le_pathbuf(alice_repo_path),
-    )?;
+        let bob_signer: signer::BoxedSigner = peer2_key.into();
+        let bob_state = Lock::from(State::new(peer2, bob_signer.clone()));
 
-    let project_urn = {
-        let alice_peer_id = alice_state.lock().await.peer_id();
-        let alice_addr = alice_state.lock().await.listen_addr();
-        let bobby = bob_state.clone().lock_owned().await;
-        tokio::task::spawn_blocking(move || {
-            bobby
-                .clone_project(
-                    project.urn().into_rad_url(alice_peer_id),
-                    vec![alice_addr].into_iter(),
-                )
-                .expect("unable to clone project")
-        })
-        .await?
-    };
+        let alice = alice_state
+            .lock()
+            .await
+            .init_owner(&alice_signer, "alice").unwrap();
+        let project = alice_state.lock().await.init_project(
+            &alice_signer,
+            &alice,
+            &shia_le_pathbuf(alice_repo_path),
+        ).unwrap();
 
-    let have = bob_state
-        .lock()
-        .await
-        .list_projects()?
-        .into_iter()
-        .map(|project| project.urn())
-        .collect::<Vec<_>>();
-    let want = vec![project_urn];
+        let _bob = bob_state.lock().await.init_owner(&bob_signer, "bob").unwrap();
 
-    assert_eq!(have, want);
+        let project_urn = {
+            let alice_peer_id = alice_state.lock().await.peer_id();
+            let alice_addr = alice_state.lock().await.listen_addr();
+            let bobby = bob_state.clone().lock_owned().await;
+            tokio::task::spawn_blocking(move || {
+                bobby
+                    .clone_project(
+                        project.urn().into_rad_url(alice_peer_id),
+                        vec![alice_addr].into_iter(),
+                    )
+                    .expect("unable to clone project")
+            })
+            .await.unwrap()
+        };
+
+        let have = bob_state
+            .lock()
+            .await
+            .list_projects().unwrap()
+            .into_iter()
+            .map(|project| project.urn())
+            .collect::<Vec<_>>();
+        let want = vec![project_urn];
+
+        assert_eq!(have, want);
+    })
+    .await;
 
     Ok(())
 }
